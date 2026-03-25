@@ -10,6 +10,7 @@ import base64
 import argparse
 import asyncio
 import uuid
+import yaml
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
@@ -29,60 +30,56 @@ import email as email_lib
 from curl_cffi import requests
 from curl_cffi import CurlMime
 
-# ================= 配置区开始 =================
-# 可选值: "imap" / "freemail" / "cloudflare_temp_email"
-EMAIL_API_MODE = "cloudflare_temp_email"
+# ================= 配置加载 =================
+def init_config():
+    config_path = "config.yaml"
+    if not os.path.exists(config_path):
+        print(f"[{ts()}] [ERROR] 配置文件 {config_path} 不存在，请检查！")
+        exit(1)
+    
+    with open(config_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
-# [公共配置: cloudflare_temp_email / imap 共享]
-MAIL_DOMAINS = "domain1.com,domain2.xyz,domain3.net" # 你的域名 (支持逗号分隔多域名随机轮换) 如果只有一个域名就只填一个域名
-GPTMAIL_BASE = "https://your-domain.com"     # 你的临时邮箱 后端API 基础地址 结尾不要/，注意：用浏览器打开后端api验证是否可访问
+_c = init_config()
 
-# [模式 "imap" 专属配置] (CF Catch-all 转发接收端)
-IMAP_SERVER = "imap.gmail.com"           # 默认为gmail IMAP 服务器地址,QQ为imap.qq.com。不建议用QQ
-IMAP_PORT = 993                          # IMAP 端口
-IMAP_USER = "" # 接收转发的真实邮箱账号
-IMAP_PASS = ""          # 16位应用专用密码，谷歌邮箱要去https://myaccount.google.com/apppasswords这里创建专属应用密码
+EMAIL_API_MODE = _c.get("email_api_mode", "cloudflare_temp_email")
+MAIL_DOMAINS = _c.get("mail_domains", "")
+GPTMAIL_BASE = _c.get("gptmail_base", "")
 
-# [模式 "freemail" 专属]
-FREEMAIL_API_URL = "https://your-domain.com"
-FREEMAIL_API_TOKEN = ""
+_imap = _c.get("imap", {})
+IMAP_SERVER = _imap.get("server", "imap.gmail.com")
+IMAP_PORT = _imap.get("port", 993)
+IMAP_USER = _imap.get("user", "")
+IMAP_PASS = _imap.get("pass", "")
 
-# [模式 "cloudflare_temp_email" 专属配置]
-ADMIN_AUTH = "" # 你的临时邮箱管理员密码
+_free = _c.get("freemail", {})
+FREEMAIL_API_URL = _free.get("api_url", "")
+FREEMAIL_API_TOKEN = _free.get("api_token", "")
 
+ADMIN_AUTH = _c.get("admin_auth", "")
 
+MAX_OTP_RETRIES = _c.get("max_otp_retries", 5)
+DEFAULT_PROXY = _c.get("default_proxy", "")
+USE_PROXY_FOR_EMAIL = _c.get("use_proxy_for_email", False)
+ENABLE_EMAIL_MASKING = _c.get("enable_email_masking", True)
+TOKEN_OUTPUT_DIR = _c.get("token_output_dir", "").strip()
 
-# [验证码重发配置]
-MAX_OTP_RETRIES = 5  # 验证码重试次数
+_cpa = _c.get("cpa_mode", {})
+ENABLE_CPA_MODE = _cpa.get("enable", False)
+SAVE_TO_LOCAL_IN_CPA_MODE = _cpa.get("save_to_local", True)
+CPA_API_URL = _cpa.get("api_url", "")
+CPA_API_TOKEN = _cpa.get("api_token", "")
+MIN_ACCOUNTS_THRESHOLD = _cpa.get("min_accounts_threshold", 30)
+BATCH_REG_COUNT = _cpa.get("batch_reg_count", 1)
+MIN_REMAINING_WEEKLY_PERCENT = _cpa.get("min_remaining_weekly_percent", 80)
+CHECK_INTERVAL_MINUTES = _cpa.get("check_interval_minutes", 60)
 
-DEFAULT_PROXY = "" #openai注册时代理地址，例子：http://127.0.0.1:7897。如果是国外服务器此项可以不填
-# [邮箱代理专项配置]
-USE_PROXY_FOR_EMAIL = False  # 【开关】True 表示获取邮箱（谷歌）也用代理，False 表示直连（推荐先试 False）如果是国外服务器此项可以保持False
-ENABLE_EMAIL_MASKING = True  # 【开关】True 表示在控制台日志中隐藏邮箱域名，False 表示显示完整邮箱
-
-TOKEN_OUTPUT_DIR = os.getenv("TOKEN_OUTPUT_DIR", "").strip() #目录 默认存放跟脚本一个目录
-# ================= 这里不要动 =================
+# --- 以下为内容不要改变 ---
 AUTH_URL = "https://auth.openai.com/oauth/authorize"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-DEFAULT_REDIRECT_URI = f"http://localhost:1455/auth/callback"
+DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback"
 DEFAULT_SCOPE = "openid email profile offline_access"
-# ================= 这里不要动 =================
-
-# ================= CPA 模式专属配置 =================
-ENABLE_CPA_MODE = False  # 【开关】True 开启巡检补货上传，False 则只进行常规无限注册
-SAVE_TO_LOCAL_IN_CPA_MODE = True  # 【开关】开启 CPA 补货时，是否同时将账号 Token 备份到本地。备份本地则为True，否则为True
-CPA_API_URL = "http://your-domain.com:8317"   # CPA的api地址
-CPA_API_TOKEN = "xxxx"  # CPA登陆密码
-MIN_ACCOUNTS_THRESHOLD = 30  # 仓库存量低于此值时触发补货
-BATCH_REG_COUNT = 1          # 每次触发补货注册的数量
-
-# 周限额剔除阈值设置 (0-100)
-# 设为 80 代表额度剩余低于 80% 就当作死号剔除，设为 0 代表完全耗尽才剔除。
-MIN_REMAINING_WEEKLY_PERCENT = 80 
-CHECK_INTERVAL_MINUTES = 60  #CPA 仓库巡检的间隔时间，默认每60分钟巡检一次
-# ================= CPA 模式专属配置 =================
-
 DEFAULT_CLIPROXY_UA = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
 KNOWN_CLIPROXY_ERROR_LABELS = {
     "usage_limit_reached": "周限额已耗尽",
@@ -92,7 +89,7 @@ KNOWN_CLIPROXY_ERROR_LABELS = {
     "unsupported_region": "地区不支持",
 }
 OTP_CODE_PATTERN = r"(?<!\d)(\d{6})(?!\d)"
-# ================= 配置区结束 =================
+# ================= 配置加载结束 =================
 
 def _load_dotenv(path: str = ".env") -> None:
     if not os.path.exists(path): return
@@ -1255,7 +1252,7 @@ def _extract_cliproxy_failure_reason(payload: Any, min_remaining_weekly_percent:
     return None
 
 def refresh_oauth_token(refresh_token: str, proxies: Any = None) -> Tuple[bool, dict]:
-    """使用 refresh_token 刷新获取新的 access_token 等凭证"""
+    """刷新获取新的 access_token 等凭证"""
     if not refresh_token:
         return False, {"error": "无 refresh_token"}
     try:
@@ -1483,7 +1480,7 @@ def normal_main_loop(args):
         try:
             result = run(args.proxy)
             if not result:
-                print(f"[{ts()}] [ERROR] ❌ 本次注册任务执行失败")
+                print(f"[{ts()}] [ERROR] 本次注册任务执行失败")
             else:
                 token_json_str, password = result
                 if token_json_str == "retry_403":
@@ -1513,7 +1510,7 @@ def normal_main_loop(args):
                             af.write(f"{account_email}----{password}\n")
                         print(f"[{ts()}] [SUCCESS] 账户明文信息已归档: {accounts_file}")
                 else:
-                    print(f"[{ts()}] [ERROR] ❌ 本次注册任务执行失败")
+                    print(f"[{ts()}] [ERROR] 本次注册任务执行失败")
 
         except Exception as e:
             print(f"[{ts()}] [ERROR] 发生未捕获全局异常: {e}")

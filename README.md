@@ -1,9 +1,33 @@
 # Email OTP Retrieval & Mailbox Integration Utility
 
+[中文文档](./README.zh-CN.md)
+
 A Python utility for mailbox integration, one-time passcode (OTP) retrieval, message parsing, proxy-aware email polling, local JSON backup, and optional internal credential-file inventory checks.
 
 > Use only in systems and environments you own or are explicitly authorized to test.
 > Make sure your use complies with applicable laws, platform rules, and service terms.
+
+## ✨ Features
+
+#### Flexible mailbox and verification workflow
+- **Multi-backend mailbox support**: Natively supports `cloudflare_temp_email`, `freemail`, and standard `imap` mailbox backends, with flexible switching through the configuration file.
+- **Dual-path domain rotation**: Supports custom multi-domain pools defined in configuration for randomized distribution; in `freemail` mode, it can also dynamically fetch available domains from the API and rotate among them automatically.
+
+#### CPA inventory maintenance and operations
+- **Automated inventory inspection**: Provides an optional CPA maintenance mode that periodically checks account inventory in the CPA system and performs health and availability inspection.
+- **Invalid credential cleanup**: Supports a configurable weekly quota threshold. When an account is identified as exhausted, deactivated, or invalid, it can be removed from inventory automatically.
+- **Low-inventory replenishment**: Monitors effective account inventory in the CPA system and can trigger a preset replenishment batch when stock drops below the configured safety threshold.
+- **Credential renewal support**: When stored credentials are approaching expiration or have become invalid, the system can attempt refresh-based renewal and update the stored credential set.
+
+#### Archival output and privacy protection
+- **Controllable local archival**: In standard mode, JSON credentials and `accounts.txt` records can be stored locally by default. In CPA replenishment mode, the separate `save_to_local` switch lets you decide whether to retain a local backup while uploading remotely.
+- **CPA API upload integration**: Supports automatically pushing newly generated JSON credentials or refreshed valid credentials to the CPA internal API for centralized storage and retrieval.
+- **Log privacy masking**: Includes built-in masking for mailbox domain output in standard console logs to reduce direct exposure of sensitive information.
+
+#### Configuration and network resilience
+- **Centralized YAML configuration**: Core runtime behavior—including proxy settings, retry counts, mailbox mode, output directory, and CPA inspection / backup parameters—is controlled through a single YAML configuration file.
+- **Flexible network routing**: Supports a global proxy configuration and allows separate proxy behavior for mailbox API requests or IMAP connections to adapt to different network environments.
+- **Retry handling for unstable networks**: Provides basic anti-jitter and timeout retry handling at key network request points to improve stability in unattended or unstable network scenarios.
 
 ## Table of Contents
 
@@ -36,371 +60,246 @@ A Python utility for mailbox integration, one-time passcode (OTP) retrieval, mes
 Install required packages:
 
 ```bash
-pip install curl_cffi pysocks
+pip install PyYAML PySocks curl_cffi
 ```
 
 ## Configuration
 
-Edit the configuration block near the top of the script.
+The project now uses `config.yaml` in the repository root as the single configuration entry point, rather than editing constants directly inside the script.
 
-### 1. Mail Backend Mode
+A typical configuration looks like this:
 
-```python
-EMAIL_API_MODE = "cloudflare_temp_email"
+```yaml
+# [Mail backend mode]
+# Available values: "imap" / "freemail" / "cloudflare_temp_email"
+email_api_mode: "cloudflare_temp_email"
+
+# [Shared settings for cloudflare_temp_email / imap]
+mail_domains: "domain1.com,domain2.xyz,domain3.net"
+gptmail_base: "https://your-domain.com"
+
+# [Proxy configuration]
+default_proxy: ""
+
+# [Mode-specific settings: imap]
+imap:
+  server: "imap.gmail.com"
+  port: 993
+  user: ""
+  pass: ""
+
+# [Mode-specific settings: freemail]
+freemail:
+  api_url: "https://your-domain.com"
+  api_token: ""
+
+# [Mode-specific settings: cloudflare_temp_email]
+admin_auth: ""
+
+# [OTP resend retries]
+max_otp_retries: 5
+
+# [Mail-side proxy options]
+use_proxy_for_email: false
+enable_email_masking: true
+
+# [Local output directory]
+token_output_dir: ""
+
+# [CPA maintenance mode]
+cpa_mode:
+  enable: false
+  save_to_local: true
+  api_url: "http://your-domain.com:8317"
+  api_token: "xxxx"
+  min_accounts_threshold: 30
+  batch_reg_count: 1
+  min_remaining_weekly_percent: 80
+  check_interval_minutes: 60
 ```
 
-Supported values:
+### 1. `email_api_mode`
 
-- `"imap"`
-- `"freemail"`
-- `"cloudflare_temp_email"`
+Selects which mailbox backend mode to use. Supported values:
 
-#### Mode summary
+- `cloudflare_temp_email`
+- `freemail`
+- `imap`
 
-**`imap`**
-- Use a real mailbox reachable via IMAP.
-- Best when incoming mail is forwarded into a real inbox.
+Mode summary:
 
-**`freemail`**
-- Use a Freemail-style HTTP API.
-- Suitable when your mailbox service is exposed through a compatible API.
+- **`cloudflare_temp_email`**: Uses a temp-mail style backend and requires `gptmail_base` plus `admin_auth`
+- **`freemail`**: Uses a Freemail-compatible API and requires `freemail.api_url` plus `freemail.api_token`
+- **`imap`**: Uses a real mailbox over IMAP and requires `imap.server / port / user / pass`
 
-**`cloudflare_temp_email`**
-- Use a Cloudflare temp mail-style backend.
-- Suitable when you manage a temp-mail backend with admin-controlled mailbox creation and message access.
+### 2. `mail_domains`
 
----
-
-### 2. Shared Mail Configuration
-
-These settings are shared by some mailbox modes.
-
-```python
-MAIL_DOMAINS = "domain1.com,domain2.xyz,domain3.net"
-GPTMAIL_BASE = "https://your-domain.com"
-```
-
-#### `MAIL_DOMAINS`
-A comma-separated list of domains used when generating mailbox addresses.
-
-Examples:
-
-```python
-MAIL_DOMAINS = "maila.com,mailb.net,mailc.org"
-```
-
-If you only have one domain:
-
-```python
-MAIL_DOMAINS = "your-domain.com"
-```
-
-Address generation behavior:
-- a random prefix is generated
-- one domain is selected from the list
-- the final address will look like `abc12x@your-domain.com`
-
-#### `GPTMAIL_BASE`
-Base URL of your temp-mail backend.
+Defines the mailbox domain pool. Multiple domains can be separated with commas.
 
 Example:
 
-```python
-GPTMAIL_BASE = "https://mail-api.example.com"
+```yaml
+mail_domains: "a.com,b.net,c.org"
+```
+
+The script generates mailbox addresses using a random prefix plus a randomly selected domain. If you only use one domain, simply provide one value.
+
+### 3. `gptmail_base`
+
+Base URL for the Cloudflare Temp Mail-style backend. This is only used when `email_api_mode: "cloudflare_temp_email"`.
+
+Example:
+
+```yaml
+gptmail_base: "https://mail-api.example.com"
 ```
 
 Do not include a trailing slash.
 
----
+### 4. `default_proxy`
 
-### 3. IMAP Configuration
-
-Use this section when:
-
-```python
-EMAIL_API_MODE = "imap"
-```
-
-Configuration:
-
-```python
-IMAP_SERVER = "imap.qq.com"
-IMAP_PORT = 993
-IMAP_USER = "your_mailbox@example.com"
-IMAP_PASS = "your_app_password"
-```
-
-#### `IMAP_SERVER`
-IMAP host name.
-
-Common values:
-
-- QQ Mail: `imap.qq.com`
-- Gmail / Google Workspace: `imap.gmail.com`
-
-#### `IMAP_PORT`
-SSL IMAP port. In most cases:
-
-```python
-IMAP_PORT = 993
-```
-
-#### `IMAP_USER`
-The mailbox login username, usually the full email address.
-
-Examples:
-
-```python
-IMAP_USER = "yourname@qq.com"
-```
-
-```python
-IMAP_USER = "yourname@gmail.com"
-```
-
-#### `IMAP_PASS`
-The IMAP login password.
-
-Important:
-For many providers, this should **not** be your normal web-login password. It is often one of the following:
-
-- app password
-- authorization code
-- mailbox-specific access token
-- provider-issued IMAP password
-
-#### QQ Mail Example
-
-```python
-EMAIL_API_MODE = "imap"
-
-IMAP_SERVER = "imap.qq.com"
-IMAP_PORT = 993
-IMAP_USER = "yourname@qq.com"
-IMAP_PASS = "abcdefghijklmnop"
-```
-
-Notes for QQ Mail:
-
-- IMAP must be enabled in mailbox settings.
-- You usually need an authorization code.
-- `IMAP_PASS` should be the authorization code, not the web password.
-
-#### Gmail / Google Workspace Example
-
-```python
-EMAIL_API_MODE = "imap"
-
-IMAP_SERVER = "imap.gmail.com"
-IMAP_PORT = 993
-IMAP_USER = "yourname@gmail.com"
-IMAP_PASS = "abcdefghijklmnop"
-```
-
-For Google Workspace accounts, the server is usually still:
-
-```python
-IMAP_SERVER = "imap.gmail.com"
-IMAP_PORT = 993
-```
-
-Notes for Gmail / Google Workspace:
-
-- IMAP access must be enabled for the mailbox.
-- Google commonly requires an **App Password** instead of the standard account password.
-- App Passwords typically require 2-Step Verification to be enabled first.
-- If available, create a 16-character App Password and place it in:
-
-```python
-IMAP_PASS = "your_16_char_app_password"
-```
-
-If App Passwords are unavailable, possible reasons include:
-
-- 2-Step Verification is not enabled
-- your organization disabled App Passwords
-- your account type or admin policy restricts IMAP/app password access
-
-Additional note:
-In Gmail environments, if message delivery looks normal but retrieval still fails, also check the spam folder in the mailbox UI.
-
----
-
-### 4. Freemail API Configuration
-
-Use this section when:
-
-```python
-EMAIL_API_MODE = "freemail"
-```
-
-Configuration:
-
-```python
-FREEMAIL_API_URL = "https://your-domain.com"
-FREEMAIL_API_TOKEN = ""
-```
-
-#### `FREEMAIL_API_URL`
-Base URL of your Freemail-compatible API.
+Global proxy address used for primary network requests.
 
 Example:
 
-```python
-FREEMAIL_API_URL = "https://mail-api.example.com"
+```yaml
+default_proxy: "http://127.0.0.1:7897"
 ```
 
-#### `FREEMAIL_API_TOKEN`
-Bearer token used for API authentication.
+Or:
+
+```yaml
+default_proxy: "socks5://127.0.0.1:1080"
+```
+
+Leave it empty if your runtime environment already has direct connectivity.
+
+### 5. `imap`
+
+When `email_api_mode` is set to `imap`, configure the following block:
+
+```yaml
+imap:
+  server: "imap.gmail.com"
+  port: 993
+  user: "your_mailbox@example.com"
+  pass: "your_app_password"
+```
+
+Field notes:
+
+- `server`: IMAP server address, such as `imap.gmail.com` or `imap.qq.com`
+- `port`: IMAP SSL port, typically `993`
+- `user`: mailbox login, usually the full email address
+- `pass`: IMAP password; for many providers this should be an app password or authorization code rather than the normal web password
+
+### 6. `freemail`
+
+When `email_api_mode` is set to `freemail`, configure:
+
+```yaml
+freemail:
+  api_url: "https://your-domain.com"
+  api_token: ""
+```
+
+Field notes:
+
+- `api_url`: base URL of the Freemail-compatible API
+- `api_token`: Bearer token used for authentication
+
+### 7. `admin_auth`
+
+When `email_api_mode` is set to `cloudflare_temp_email`, this field is used as the administrator credential for the temp-mail backend.
 
 Example:
 
-```python
-FREEMAIL_API_TOKEN = "your_api_token_here"
+```yaml
+admin_auth: "your_admin_secret"
 ```
 
----
+### 8. `max_otp_retries`
 
-### 5. Cloudflare Temp Mail Configuration
-
-Use this section when:
-
-```python
-EMAIL_API_MODE = "cloudflare_temp_email"
-```
-
-Main settings:
-
-```python
-MAIL_DOMAINS = "domain1.com,domain2.xyz"
-GPTMAIL_BASE = "https://your-domain.com"
-ADMIN_AUTH = ""
-```
-
-#### `ADMIN_AUTH`
-Administrator password or admin auth token for your temp mail backend.
+Controls the maximum number of resend / retry attempts when OTP retrieval fails.
 
 Example:
 
-```python
-ADMIN_AUTH = "your_admin_secret"
+```yaml
+max_otp_retries: 5
 ```
 
-Recommended when:
-- you operate your own temp mail backend
-- the backend supports admin-controlled address creation
-- the backend supports mailbox message access for retrieval workflows
+When messages are delayed or OTP extraction fails, the script uses this value to determine retry behavior.
 
----
+### 9. `use_proxy_for_email`
 
-### 6. Proxy Configuration
+Controls whether mailbox-side requests should also use the proxy.
 
-```python
-DEFAULT_PROXY = ""
-USE_PROXY_FOR_EMAIL = False
+```yaml
+use_proxy_for_email: false
 ```
 
-#### `DEFAULT_PROXY`
-Primary proxy address used for outbound HTTP requests.
+- `false`: mailbox APIs / IMAP connections are direct by default
+- `true`: mailbox APIs / IMAP connections also go through the proxy
 
-Examples:
+Enable this only when your mailbox API or IMAP service must be accessed through a proxy.
 
-```python
-DEFAULT_PROXY = "http://127.0.0.1:7897"
+### 10. `enable_email_masking`
+
+Controls whether mailbox domains are masked in console logs.
+
+```yaml
+enable_email_masking: true
 ```
 
-```python
-DEFAULT_PROXY = "socks5://127.0.0.1:1080"
+- `true`: logs display masked mailbox output
+- `false`: logs display the full mailbox address
+
+### 11. `token_output_dir`
+
+Specifies the local output directory.
+
+```yaml
+token_output_dir: ""
 ```
 
-#### `USE_PROXY_FOR_EMAIL`
-Controls whether email-related requests should also go through the proxy.
+- Empty: output is written to the current script directory
+- Set a path: output is written to the specified directory
 
-```python
-USE_PROXY_FOR_EMAIL = False
+The script creates the directory automatically when needed.
+
+### 12. `cpa_mode`
+
+`cpa_mode` is an optional maintenance configuration block for inventory inspection and upkeep:
+
+```yaml
+cpa_mode:
+  enable: false
+  save_to_local: true
+  api_url: "http://your-domain.com:8317"
+  api_token: "xxxx"
+  min_accounts_threshold: 30
+  batch_reg_count: 1
+  min_remaining_weekly_percent: 80
+  check_interval_minutes: 60
 ```
 
-- `False`: email access is direct
-- `True`: email access also uses the proxy
+Field notes:
 
-Recommended default:
+- `enable`: enables CPA maintenance mode
+- `save_to_local`: whether to retain a local backup while uploading remotely in CPA mode
+- `api_url`: CPA internal API endpoint
+- `api_token`: CPA API credential / token
+- `min_accounts_threshold`: triggers replenishment logic when inventory falls below this value
+- `batch_reg_count`: number of items processed in each replenishment batch
+- `min_remaining_weekly_percent`: threshold used in health assessment logic
+- `check_interval_minutes`: inspection interval in minutes
 
-```python
-USE_PROXY_FOR_EMAIL = False
-```
+### 13. Configuration suggestions
 
-Use `True` only if your email API or IMAP server must be reached through a proxy.
-
-#### Gmail + IMAP + proxy note
-If you use Gmail over IMAP and need email traffic to go through a proxy, make sure `PySocks` is installed and your proxy settings are valid.
-
----
-
-### 7. Output Directory Configuration
-
-```python
-TOKEN_OUTPUT_DIR = os.getenv("TOKEN_OUTPUT_DIR", "").strip()
-```
-
-This controls where output files are written.
-
-#### Default behavior
-If empty, files are saved in the current script directory.
-
-#### Using an environment variable
-Windows PowerShell:
-
-```powershell
-$env:TOKEN_OUTPUT_DIR="C:\output\mail_tokens"
-```
-
-Linux / macOS:
-
-```bash
-export TOKEN_OUTPUT_DIR=/data/mail_tokens
-```
-
-The script will create the directory if needed.
-
----
-
-### 8. Optional Internal Inventory Check Configuration
-
-```python
-ENABLE_CPA_MODE = False
-CPA_API_URL = "http://your-domain.com:8317"
-CPA_API_TOKEN = "xxxx"
-MIN_ACCOUNTS_THRESHOLD = 30
-BATCH_REG_COUNT = 1
-MIN_REMAINING_WEEKLY_PERCENT = 80
-CHECK_INTERVAL_MINUTES = 60
-```
-
-This section is best understood as optional internal inventory maintenance for auth files.
-
-#### `ENABLE_CPA_MODE`
-Controls whether the internal inventory loop is enabled.
-
-- `False`: normal mode
-- `True`: inventory-check mode
-
-#### `CPA_API_URL`
-Base URL of the internal management API.
-
-#### `CPA_API_TOKEN`
-Bearer token for the internal management API.
-
-#### `MIN_ACCOUNTS_THRESHOLD`
-If valid stored items fall below this threshold, the maintenance logic may trigger a replenishment action.
-
-#### `BATCH_REG_COUNT`
-Number of items processed per maintenance cycle.
-
-#### `MIN_REMAINING_WEEKLY_PERCENT`
-Threshold used in health assessment logic.
-
-#### `CHECK_INTERVAL_MINUTES`
-Interval between maintenance loops, in minutes.
+- **IMAP only**: focus on `email_api_mode`, `mail_domains`, `imap`, and `use_proxy_for_email`
+- **Freemail API only**: focus on `email_api_mode`, `freemail.api_url`, and `freemail.api_token`
+- **Cloudflare Temp Mail backend only**: focus on `email_api_mode`, `mail_domains`, `gptmail_base`, and `admin_auth`
+- **Inventory maintenance enabled**: additionally complete the full `cpa_mode` block
 
 ## Usage
 
