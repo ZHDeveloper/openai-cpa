@@ -1,6 +1,6 @@
 # Email OTP Retrieval & Mailbox Integration Utility
 
-A Python utility for mailbox integration, one-time passcode (OTP) retrieval, message parsing, proxy-aware email polling, local JSON backup, and optional internal credential-file inventory checks.
+A Python utility for mailbox integration, one-time passcode (OTP) retrieval, message parsing, proxy-aware email polling, local JSON backup, optional Clash proxy rotation, and optional internal credential-file inventory checks.
 
 > Use only in systems and environments you own or are explicitly authorized to test.
 > Make sure your use complies with applicable laws, platform rules, and service terms.
@@ -10,6 +10,14 @@ A Python utility for mailbox integration, one-time passcode (OTP) retrieval, mes
 #### Flexible mailbox and verification workflow
 - **Multi-backend mailbox support**: Natively supports `cloudflare_temp_email`, `freemail`, and standard `imap` mailbox backends, with flexible switching through the configuration file.
 - **Dual-path domain rotation**: Supports custom multi-domain pools defined in configuration for randomized distribution; in `freemail` mode, it can also dynamically fetch available domains from the API and rotate among them automatically.
+- **OTP polling and extraction**: Automatically polls mailbox content and extracts 6-digit OTP codes from subject lines, message bodies, HTML content, or raw email payloads.
+- **Robust email parsing**: Includes MIME header decoding, HTML-to-text conversion, raw mail parsing, and common encoding compatibility handling.
+
+#### Proxy management and network resilience
+- **Clash proxy rotation support**: Supports automatic outbound node switching through Clash External Controller APIs. When enabled, the workflow rotates nodes before each registration task, applies blacklist-based filtering, and verifies connectivity after switching.
+- **Flexible network routing**: Supports a global proxy configuration and allows separate proxy behavior for mailbox API requests or IMAP connections to adapt to different network environments.
+- **Region-aware proxy validation**: Tests outbound connectivity and can skip blocked or unsuitable regions such as `CN` / `HK` after node switching.
+- **Retry handling for unstable networks**: Provides basic anti-jitter and timeout retry handling at key network request points to improve stability in unattended or unstable network scenarios.
 
 #### CPA inventory maintenance and operations
 - **Automated inventory inspection**: Provides an optional CPA maintenance mode that periodically checks account inventory in the CPA system and performs health and availability inspection.
@@ -21,11 +29,7 @@ A Python utility for mailbox integration, one-time passcode (OTP) retrieval, mes
 - **Controllable local archival**: In standard mode, JSON credentials and `accounts.txt` records can be stored locally by default. In CPA replenishment mode, the separate `save_to_local` switch lets you decide whether to retain a local backup while uploading remotely.
 - **CPA API upload integration**: Supports automatically pushing newly generated JSON credentials or refreshed valid credentials to the CPA internal API for centralized storage and retrieval.
 - **Log privacy masking**: Includes built-in masking for mailbox domain output in standard console logs to reduce direct exposure of sensitive information.
-
-#### Configuration and network resilience
-- **Centralized YAML configuration**: Core runtime behavior—including proxy settings, retry counts, mailbox mode, output directory, and CPA inspection / backup parameters—is controlled through a single YAML configuration file.
-- **Flexible network routing**: Supports a global proxy configuration and allows separate proxy behavior for mailbox API requests or IMAP connections to adapt to different network environments.
-- **Retry handling for unstable networks**: Provides basic anti-jitter and timeout retry handling at key network request points to improve stability in unattended or unstable network scenarios.
+- **Centralized YAML configuration**: Core runtime behavior—including proxy settings, retry counts, mailbox mode, output directory, Clash proxy rotation, and CPA inspection / backup parameters—is controlled through a single YAML configuration file.
 
 ## Table of Contents
 
@@ -36,15 +40,17 @@ A Python utility for mailbox integration, one-time passcode (OTP) retrieval, mes
   - [2. `mail_domains`](#2-mail_domains)
   - [3. `gptmail_base`](#3-gptmail_base)
   - [4. `default_proxy`](#4-default_proxy)
-  - [5. `imap`](#5-imap)
-  - [6. `freemail`](#6-freemail)
-  - [7. `admin_auth`](#7-admin_auth)
-  - [8. `max_otp_retries`](#8-max_otp_retries)
-  - [9. `use_proxy_for_email`](#9-use_proxy_for_email)
-  - [10. `enable_email_masking`](#10-enable_email_masking)
-  - [11. `token_output_dir`](#11-token_output_dir)
-  - [12. `cpa_mode`](#12-cpa_mode)
-  - [13. Configuration suggestions](#13-configuration-suggestions)
+  - [5. `clash_proxy_pool`](#5-clash_proxy_pool)
+  - [6. `imap`](#6-imap)
+  - [7. `freemail`](#7-freemail)
+  - [8. `admin_auth`](#8-admin_auth)
+  - [9. `max_otp_retries`](#9-max_otp_retries)
+  - [10. `use_proxy_for_email`](#10-use_proxy_for_email)
+  - [11. `enable_email_masking`](#11-enable_email_masking)
+  - [12. `token_output_dir`](#12-token_output_dir)
+  - [13. `cpa_mode`](#13-cpa_mode)
+  - [14. `normal_mode`](#14-normal_mode)
+  - [15. Configuration suggestions](#15-configuration-suggestions)
 - [Usage](#usage)
 - [Output Files](#output-files)
 - [Troubleshooting](#troubleshooting)
@@ -53,20 +59,22 @@ A Python utility for mailbox integration, one-time passcode (OTP) retrieval, mes
 ## Requirements
 
 - Python 3.10+
+- `PyYAML`
 - `curl_cffi`
 - `PySocks` (only needed if you want IMAP connections to go through a proxy)
+- `requests` (used by `proxy_manager.py` for Clash controller access and proxy liveness checks)
 
 ## Installation
 
 Install required packages:
 
 ```bash
-pip install PyYAML PySocks curl_cffi
+pip install PyYAML PySocks curl_cffi requests
 ```
 
 ## Configuration
 
-The project now uses `config.yaml` in the repository root as the single configuration entry point, rather than editing constants directly inside the script.
+The project uses `config.yaml` in the repository root as the single configuration entry point.
 
 A typical configuration looks like this:
 
@@ -80,7 +88,34 @@ mail_domains: "domain1.com,domain2.xyz,domain3.net"
 gptmail_base: "https://your-domain.com"
 
 # [Proxy configuration]
-default_proxy: ""
+default_proxy: "http://127.0.0.1:7897"
+
+# [Clash proxy rotation]
+clash_proxy_pool:
+  enable: false
+  api_url: "http://127.0.0.1:9097"
+  group_name: "节点选择"
+  secret: "set-your-secret"
+  test_proxy_url: "http://127.0.0.1:7897"
+  blacklist:
+    - "自动"
+    - "故障"
+    - "剩余"
+    - "到期"
+    - "官网"
+    - "Traffic"
+    - "DIRECT"
+    - "REJECT"
+    - "港"
+    - "HK"
+    - "Hongkong"
+    - "台"
+    - "TW"
+    - "Taiwan"
+    - "中"
+    - "CN"
+    - "China"
+    - "回国"
 
 # [Mode-specific settings: imap]
 imap:
@@ -117,6 +152,11 @@ cpa_mode:
   batch_reg_count: 1
   min_remaining_weekly_percent: 80
   check_interval_minutes: 60
+
+# [Standard loop mode]
+normal_mode:
+  sleep_min: 5
+  sleep_max: 30
 ```
 
 ### 1. `email_api_mode`
@@ -175,7 +215,57 @@ default_proxy: "socks5://127.0.0.1:1080"
 
 Leave it empty if your runtime environment already has direct connectivity.
 
-### 5. `imap`
+### 5. `clash_proxy_pool`
+
+`clash_proxy_pool` is an optional configuration block for automatic Clash node rotation via the External Controller API.
+
+```yaml
+clash_proxy_pool:
+  enable: false
+  api_url: "http://127.0.0.1:9097"
+  group_name: "节点选择"
+  secret: "set-your-secret"
+  test_proxy_url: "http://127.0.0.1:7897"
+  blacklist:
+    - "自动"
+    - "故障"
+    - "剩余"
+    - "到期"
+    - "官网"
+    - "Traffic"
+    - "DIRECT"
+    - "REJECT"
+    - "港"
+    - "HK"
+    - "Hongkong"
+    - "台"
+    - "TW"
+    - "Taiwan"
+    - "中"
+    - "CN"
+    - "China"
+    - "回国"
+```
+
+Field notes:
+
+- `enable`: enables automatic node switching before each registration task
+- `api_url`: Clash External Controller endpoint, usually on port `9090` or `9097`
+- `group_name`: proxy group keyword used to locate the actual selectable Clash group
+- `secret`: authentication secret for the Clash controller, if enabled
+- `test_proxy_url`: local proxy endpoint used for post-switch connectivity testing
+- `blacklist`: keywords used to exclude unwanted nodes such as unsupported regions or non-routable entries
+
+Behavior summary:
+
+- Queries the Clash controller for available proxy groups
+- Fuzzily matches the configured group name against actual Clash group names
+- Filters candidate nodes using the configured blacklist
+- Randomly selects a node and sends the switch command through the controller API
+- Verifies post-switch connectivity and skips blocked regions such as `CN` / `HK`
+- Falls back to the current IP if switching fails
+
+### 6. `imap`
 
 When `email_api_mode` is set to `imap`, configure the following block:
 
@@ -194,7 +284,7 @@ Field notes:
 - `user`: mailbox login, usually the full email address
 - `pass`: IMAP password; for many providers this should be an app password or authorization code rather than the normal web password
 
-### 6. `freemail`
+### 7. `freemail`
 
 When `email_api_mode` is set to `freemail`, configure:
 
@@ -209,7 +299,7 @@ Field notes:
 - `api_url`: base URL of the Freemail-compatible API
 - `api_token`: Bearer token used for authentication
 
-### 7. `admin_auth`
+### 8. `admin_auth`
 
 When `email_api_mode` is set to `cloudflare_temp_email`, this field is used as the administrator credential for the temp-mail backend.
 
@@ -219,7 +309,7 @@ Example:
 admin_auth: "your_admin_secret"
 ```
 
-### 8. `max_otp_retries`
+### 9. `max_otp_retries`
 
 Controls the maximum number of resend / retry attempts when OTP retrieval fails.
 
@@ -231,7 +321,7 @@ max_otp_retries: 5
 
 When messages are delayed or OTP extraction fails, the script uses this value to determine retry behavior.
 
-### 9. `use_proxy_for_email`
+### 10. `use_proxy_for_email`
 
 Controls whether mailbox-side requests should also use the proxy.
 
@@ -244,7 +334,7 @@ use_proxy_for_email: false
 
 Enable this only when your mailbox API or IMAP service must be accessed through a proxy.
 
-### 10. `enable_email_masking`
+### 11. `enable_email_masking`
 
 Controls whether mailbox domains are masked in console logs.
 
@@ -255,7 +345,7 @@ enable_email_masking: true
 - `true`: logs display masked mailbox output
 - `false`: logs display the full mailbox address
 
-### 11. `token_output_dir`
+### 12. `token_output_dir`
 
 Specifies the local output directory.
 
@@ -268,7 +358,7 @@ token_output_dir: ""
 
 The script creates the directory automatically when needed.
 
-### 12. `cpa_mode`
+### 13. `cpa_mode`
 
 `cpa_mode` is an optional maintenance configuration block for inventory inspection and upkeep:
 
@@ -295,11 +385,27 @@ Field notes:
 - `min_remaining_weekly_percent`: threshold used in health assessment logic
 - `check_interval_minutes`: inspection interval in minutes
 
-### 13. Configuration suggestions
+### 14. `normal_mode`
+
+`normal_mode` controls the wait interval between iterations in the standard loop.
+
+```yaml
+normal_mode:
+  sleep_min: 5
+  sleep_max: 30
+```
+
+Field notes:
+
+- `sleep_min`: minimum wait time in seconds after each cycle
+- `sleep_max`: maximum wait time in seconds after each cycle
+
+### 15. Configuration suggestions
 
 - **IMAP only**: focus on `email_api_mode`, `mail_domains`, `imap`, and `use_proxy_for_email`
 - **Freemail API only**: focus on `email_api_mode`, `freemail.api_url`, and `freemail.api_token`
 - **Cloudflare Temp Mail backend only**: focus on `email_api_mode`, `mail_domains`, `gptmail_base`, and `admin_auth`
+- **Clash rotation enabled**: additionally complete the `clash_proxy_pool` block and enable Clash external control in your local environment
 - **Inventory maintenance enabled**: additionally complete the full `cpa_mode` block
 
 ## Usage
@@ -342,6 +448,15 @@ Use care when storing or handling this file.
 
 ## Troubleshooting
 
+### Clash node switching fails
+Check the following:
+- Clash external control is enabled
+- `clash_proxy_pool.api_url` points to the correct controller endpoint
+- the controller `secret` is correct if authentication is enabled
+- `group_name` matches a real selectable proxy group in Clash
+- `test_proxy_url` points to a working local proxy port
+- the blacklist is not too strict and does not filter out all nodes
+
 ### Gmail IMAP login fails
 Check the following:
 - IMAP is enabled
@@ -373,11 +488,12 @@ Possible causes:
 ## Security Notes
 
 - Do not expose `accounts.txt` or JSON credential outputs publicly.
-- Prefer environment variables for sensitive configuration.
+- Prefer environment variables for sensitive configuration when possible.
 - Restrict access to the output directory.
 - If used in a team setting, add audit logging and permission boundaries.
 
 ## Notes
+
 - This repository is intended for research, testing, and internal workflow automation.
 - Please ensure your usage complies with applicable laws, platform policies, and service terms.
 - Review and adapt configuration values before running in any real environment.
