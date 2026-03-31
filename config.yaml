@@ -3,8 +3,9 @@
 # https://github.com/dreamhunter2333/cloudflare_temp_email
 # https://github.com/maillab/cloud-mail
 # https://github.com/s12ryt/mail-curl
-# 可选值: "imap" / "freemail" / "cloudflare_temp_email" / "cloudmail" / "mail_curl"
-email_api_mode: "cloudflare_temp_email"
+# https://tempmail.lol/zh/api  (无需部署，免费公共 API)
+# 可选值: "imap" / "freemail" / "cloudflare_temp_email" / "cloudmail" / "mail_curl" / "tempmail_lol"
+email_api_mode: "tempmail_lol"
 
 # [基础配置: cloudflare_temp_email / imap / cloudmail 共享]
 # 你的域名 (支持逗号分隔多域名随机轮换) 如果只有一个域名就只填一个域名
@@ -43,6 +44,13 @@ cloudmail:
   admin_email: "admin@your-domain.com"
   admin_password: "你的管理员密码"
 
+# [模式"tempmail_lol" 专属配置]
+# 使用 https://tempmail.lol 的免费公共 API，无需部署任何服务
+# 无需填写任何配置，开箱即用。邮箱有效期约 10 分钟。
+tempmail_lol:
+  # API 基础地址，默认无需修改
+  api_base: "https://api.tempmail.lol"
+
 # [模式 "mail_curl" 专属配置]
 mail_curl:
   #访问链接
@@ -54,7 +62,7 @@ mail_curl:
 default_proxy: ""
 
 # 是否开启注册多线程并发 (true/false)
-enable_multi_thread_reg: false    
+enable_multi_thread_reg: true    
 # 注册时的最大并发线程数 (建议根据你的代理质量调整，不要设置过高)
 reg_threads: 10
 
@@ -131,17 +139,17 @@ token_output_dir: ""
 # CPA 模式专属配置
 cpa_mode:
   # 【开关】true 开启巡检补货上传，false 则只进行常规无限注册
-  enable: false
+  enable: true
   # 【开关】开启 CPA 补货时，是否同时将账号 Token 备份到本地，默认true为备份
   save_to_local: true
   # CPA的访问地址
-  api_url: "http://your-domain.com:8317"
+  api_url: "http://localhost:8317"
   # CPA登陆密码
-  api_token: "xxxx"
+  api_token: "admin"
   # 仓库存量低于此值时触发补货
-  min_accounts_threshold: 30
+  min_accounts_threshold: 15
   # 每次触发补货注册的数量
-  batch_reg_count: 1
+  batch_reg_count: 6
   # 周限额剔除阈值设置 (0-100)
   # 设为 80 代表额度剩余低于 80% 就当作死号剔除，设为 0 代表完全耗尽才剔除。
   min_remaining_weekly_percent: 80
@@ -152,7 +160,7 @@ cpa_mode:
   # 是否开启刷新token功能
   enable_token_revive: false
   # CPA 仓库巡检的间隔时间，默认每60分钟巡检一次
-  check_interval_minutes: 60
+  check_interval_minutes: 2
   #并发线程数配置，默认 10 线程
   threads: 10
 

@@ -72,6 +72,9 @@ _mc = _c.get("mail_curl", {})
 MC_API_BASE = _mc.get("api_base", "").rstrip('/')
 MC_KEY = _mc.get("key", "")
 
+_tml = _c.get("tempmail_lol", {})
+TML_API_BASE = _tml.get("api_base", "https://api.tempmail.lol").rstrip('/')
+
 ADMIN_AUTH = _c.get("admin_auth", "")
 
 MAX_OTP_RETRIES = _c.get("max_otp_retries", 5)
@@ -279,6 +282,27 @@ def get_email_and_token(proxies: Any = None) -> tuple:
                 return email, mailbox_id
         except Exception as e:
             print(f"[{ts()}] [ERROR] mail-curl 获取邮箱异常: {e}")
+        return None, None
+
+    if EMAIL_API_MODE == "tempmail_lol":
+        for attempt in range(5):
+            try:
+                res = requests.get(
+                    f"{TML_API_BASE}/generate",
+                    proxies=mail_proxies, verify=_ssl_verify(), timeout=15
+                )
+                res.raise_for_status()
+                data = res.json()
+                addr = data.get("address", "")
+                token = data.get("token", "")
+                if addr and token:
+                    print(f"[{ts()}] [INFO] tempmail.lol 分配邮箱: {mask_email(addr)}")
+                    return addr, token
+                print(f"[{ts()}] [WARNING] tempmail.lol 返回异常 (尝试 {attempt+1}/5): {res.text}")
+                time.sleep(1)
+            except Exception as e:
+                print(f"[{ts()}] [ERROR] tempmail.lol 获取邮箱失败: {e}")
+                time.sleep(2)
         return None, None
     
     if EMAIL_API_MODE == "cloudmail":
@@ -712,6 +736,42 @@ def get_oai_code(email: str, jwt: str = "", proxies: Any = None, processed_mail_
                             processed_mail_ids.add(mail_id)
                             print(f" 提取成功: {code}")
                             return code
+            elif EMAIL_API_MODE == "tempmail_lol":
+                # jwt 字段存储的是 tempmail.lol 的 token
+                tml_token = jwt
+                if not tml_token:
+                    print(f"\n[{ts()}] [ERROR] tempmail.lol token 缺失，无法收信")
+                    break
+                try:
+                    check_url = f"{TML_API_BASE}/auth/{tml_token}"
+                    res = requests.get(
+                        check_url,
+                        proxies=mail_proxies, verify=_ssl_verify(), timeout=15
+                    )
+                    if res.status_code == 200:
+                        data = res.json()
+                        emails_list = data.get("email") or []
+                        if not isinstance(emails_list, list):
+                            emails_list = []
+                        for mail in emails_list:
+                            # tempmail.lol 的 邮id 用 from+subject 组合
+                            m_id = str(mail.get("id") or f"{mail.get('from','')}_{mail.get('subject','')}")
+                            if m_id in processed_mail_ids:
+                                continue
+                            content = "\n".join(filter(None, [
+                                str(mail.get("subject") or ""),
+                                str(mail.get("body") or ""),
+                                str(mail.get("html") or ""),
+                            ]))
+                            # 去除 HTML 标签
+                            content = re.sub(r"<[^>]+>", " ", content)
+                            code = _extract_otp_code(content)
+                            if code:
+                                processed_mail_ids.add(m_id)
+                                print(f"\n[{ts()}] [SUCCESS] tempmail.lol 提取验证码成功: {code}")
+                                return code
+                except Exception as e:
+                    print(f"\n[{ts()}] [ERROR] tempmail.lol 收信异常: {e}")
             else:
                 if jwt:
                     res = requests.get(
